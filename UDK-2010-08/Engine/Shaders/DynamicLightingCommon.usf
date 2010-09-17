@@ -1,0 +1,41 @@
+/*=============================================================================
+	DynamicLightingCommon.usf: Contains functions shared by dynamic light shaders.
+	Copyright 1998-2010 Epic Games, Inc. All Rights Reserved.
+=============================================================================*/
+
+half4 LightColorAndFalloffExponent;
+
+// Unpack the light color and falloff exponent.
+static half3 LightColor = LightColorAndFalloffExponent.xyz;
+static half FalloffExponent = LightColorAndFalloffExponent.w;
+
+/** Distance field shadow parameters: bias to transform distance into the penumbra in x, scale in y, exponent in z. */
+float3 DistanceFieldParameters;
+/** Static texture shadow map that contains a [0,1] shadow factor or distance in the case of distance field shadows. */
+sampler2D ShadowTexture;
+
+sampler2D ShadowDepthTexture;
+float4x4 ScreenToShadowMatrix;
+/** Shadow buffer size in x, texel size in y, override shadow factor in z. */
+float3 ShadowBufferAndTexelSize;
+
+bool bReceiveDynamicShadows;
+
+/** Calculates shadowing from a single shadow buffer for a screenspace position. */
+float CalculateForwardDynamicShadowing(float4 ScreenPosition)
+{
+	float4 ShadowPosition = MulMatrix(ScreenToShadowMatrix,ScreenPosition);
+	ShadowPosition.xy /= ShadowPosition.w;
+
+	float4 ShadowDepths;
+	ShadowDepths.x = texDepth2D(ShadowDepthTexture, ShadowPosition.xy).x;
+	ShadowDepths.y = texDepth2D(ShadowDepthTexture, ShadowPosition.xy + float2(0, ShadowBufferAndTexelSize.y)).x;
+	ShadowDepths.z = texDepth2D(ShadowDepthTexture, ShadowPosition.xy + float2(ShadowBufferAndTexelSize.y, 0)).x;
+	ShadowDepths.w = texDepth2D(ShadowDepthTexture, ShadowPosition.xy + ShadowBufferAndTexelSize.yy).x;
+
+	float4 ShadowFactors = ShadowPosition.zzzz < ShadowDepths;
+	// Use one PCF calculation
+	float2 Fraction = frac(ShadowPosition.xy * ShadowBufferAndTexelSize.xx);
+	float2 VerticalLerp = lerp(ShadowFactors.xy, ShadowFactors.zw, Fraction.xx);
+	return lerp(VerticalLerp.x, VerticalLerp.y, Fraction.y) * ShadowBufferAndTexelSize.z;
+}

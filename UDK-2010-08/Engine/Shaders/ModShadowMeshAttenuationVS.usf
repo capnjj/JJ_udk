@@ -1,0 +1,50 @@
+/*=============================================================================
+	ModShadowMeshAttenuationVS.usf: Mesh attenutation VS for modulated shadows
+	Copyright 1998-2010 Epic Games, Inc. All Rights Reserved.
+=============================================================================*/
+
+#include "Common.usf"
+#include "Material.usf"
+#include "VertexFactory.usf"
+
+float4 LightPosition;
+
+void Main(
+	FVertexFactoryInput Input,
+	out FVertexFactoryInterpolants OutFactoryInterpolants,
+	out float3 OutTangentLightVector : TEXCOORD4,
+	out float4 OutCameraVectorOrVertexColor : TEXCOORD5,
+	out float4 OutPixelPosition : TEXCOORD6,
+	out float4 OutPosition : POSITION
+	)
+{
+	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+	float4 WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates);
+	float3x3 TangentBasis = VertexFactoryGetTangentBasis(Input, VFIntermediates);
+
+	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentBasis);
+	// Isolate instructions used for world position offset on xbox 360, 
+	// As these cause the optimizer to generate different position calculating instructions in each pass, resulting in self-z-fighting.
+	// This is only necessary for shaders used in passes that have depth testing enabled.
+	ISOLATE
+	{
+		WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
+	}
+
+	OutPosition = MulMatrix(ViewProjectionMatrix,WorldPosition);
+	OutFactoryInterpolants = VertexFactoryGetInterpolants(Input, VFIntermediates);
+#if WORLD_POS
+	OutPixelPosition = WorldPosition;
+#else
+	OutPixelPosition = OutPosition;
+#endif
+
+	OutCameraVectorOrVertexColor = 1;
+#if PER_PIXEL_CAMERA_VECTOR
+	OutCameraVectorOrVertexColor = VertexFactoryGetVertexColor( Input, VFIntermediates );
+#else
+	OutCameraVectorOrVertexColor.xyz = VertexFactoryWorldToTangentSpace(Input,VFIntermediates,TangentBasis,CameraPosition.xyz - WorldPosition.xyz * CameraPosition.w);
+#endif
+
+	OutTangentLightVector = VertexFactoryWorldToTangentSpace(Input,VFIntermediates,TangentBasis,LightPosition.xyz - WorldPosition.xyz);
+}

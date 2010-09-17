@@ -1,0 +1,323 @@
+/*=============================================================================
+	LandscapeVertexFactory.usf: Terrain vertex factory using vertex texture fetch
+	Copyright 1998-2010 Epic Games, Inc. All Rights Reserved.
+=============================================================================*/
+
+
+#define TERRAIN_ZSCALE				(1.0f/128.0f)
+
+
+#define TERRAIN_VERTEX_FACTORY 1
+
+float4x4	LocalToWorld;
+float4x4	PreviousLocalToWorld;
+
+float4 HeightmapUVScaleBias;
+float4 WeightmapUVScaleBias;
+float HeightmapLodBias;
+
+/* x = LOD
+   y = convert current LOD coordinates into highest LOD coordinates
+   z = convert highest LOD coordinates into next LOD coordinates.
+   w = convert next LOD coordinates into highest LOD coordinates.
+*/
+float4 LodValues;
+
+/* x = Camera X in local space
+   y = Camera Y in local space 
+   z = Distance from camera for current LOD
+   w = Distance from camera to next LOD.
+*/
+float4 LodDistancesValues;
+
+/* x = SectionSizeQuads
+   y = 1/SectionSizeQuads
+   z = LayerUVPan.u
+   w = LayerUVPan.w
+  */
+float4 SectionSizeQuadsLayerUVPan;
+
+sampler2D HeightmapTexture;
+
+struct FVertexFactoryInput
+{
+	float2	VertexIndex: POSITION;
+};
+
+struct FVertexFactoryInterpolants
+{
+#if WORLD_COORDS
+	// First row of the tangent to world matrix
+	float3	TangentToWorld0	: TANGENTTOWORLD0;
+	// Last row of the tangent to world matrix in xyz, determinant of tangent basis in w
+	float4	TangentToWorld2	: TANGENTTOWORLD2;
+#endif
+	float3	LayerTexCoord		: TEXCOORD0;
+	float4	HeightWeightMapTexCoord	: TEXCOORD1;
+#if NEEDS_LIGHTMAP_COORDINATE
+	float2	LightMapCoordinate	: TEXCOORD2;
+#endif // NEEDS_LIGHTMAP_COORDINATE
+};
+
+struct FVertexFactoryIntermediates
+{
+	float3 LocalPosition;
+	float3 Normal;
+};
+
+/** Converts from vertex factory specific interpolants to a FMaterialPixelParameters, which is used by material inputs. */
+FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolants Interpolants)
+{
+	FMaterialPixelParameters	Result;
+
+#if NUM_MATERIAL_TEXCOORDS
+	#if NUM_MATERIAL_TEXCOORDS >= 1
+		Result.TexCoords[0] = Interpolants.HeightWeightMapTexCoord.xy;		// Heightmap
+	#if NUM_MATERIAL_TEXCOORDS >= 2
+		Result.TexCoords[1] = Interpolants.HeightWeightMapTexCoord.zw;		// Weightmap
+	#if NUM_MATERIAL_TEXCOORDS >= 3
+		#if NEEDS_LIGHTMAP_COORDINATE
+			Result.TexCoords[2] = Interpolants.LightMapCoordinate;			// Lightmap
+		#else	//#if NEEDS_LIGHTMAP_COORDINATE
+			Result.TexCoords[2] = Interpolants.HeightWeightMapTexCoord.xy;
+		#endif	//#if NEEDS_LIGHTMAP_COORDINATE
+	#if NUM_MATERIAL_TEXCOORDS >= 4
+		Result.TexCoords[3] = Interpolants.LayerTexCoord.xy;				// XY layer
+	#if NUM_MATERIAL_TEXCOORDS >= 5
+		Result.TexCoords[4] = Interpolants.LayerTexCoord.xz;				// XZ layer
+	#if NUM_MATERIAL_TEXCOORDS >= 6
+		Result.TexCoords[5] = Interpolants.LayerTexCoord.yz;				// YZ layer
+	#endif
+	#endif
+	#endif
+	#endif
+	#endif
+	#endif
+#endif // NUM_MATERIAL_TEXCOORDS
+ 
+	Result.VertexColor = 1;
+	Result.TangentNormal = 0;
+	Result.TangentReflectionVector = 0;
+	Result.TangentCameraVector = 0;
+	Result.TangentLightVector = 0;
+	Result.ScreenPosition = 0;
+#if WORLD_COORDS	
+	#if DECAL_FACTORY
+		half3 TangentToWorld0 = UnpackColor3( Interpolants.TangentToWorld0 );
+		Result.TangentToWorld = CalcInvTangentBasisDecal( TangentToWorld0 );
+	#else
+		half3 TangentToWorld0 = UnpackColor3( Interpolants.TangentToWorld0 );
+		half4 TangentToWorld2 = UnpackColor4( Interpolants.TangentToWorld2 );
+		Result.TangentToWorld = CalcTangentToWorld( TangentToWorld0, TangentToWorld2 );
+	#endif
+	Result.UnMirrored = 1;
+#endif
+#if MATERIAL_DECAL
+	Result.DecalAttenuation = 1;
+	Result.DecalPlaneDistance = 0;
+#endif
+
+#if LIGHTMAP_UV_ACCESS
+#if NEEDS_LIGHTMAP_COORDINATE	//TEXTURE_LIGHTMAP || SIMPLE_TEXTURE_LIGHTMAP
+	Result.LightmapUVs = Interpolants.LightMapCoordinate;
+#else
+	Result.LightmapUVs = Interpolants.HeightWeightMapTexCoord.xy;
+#endif
+#endif
+
+	Result.TwoSidedSign = 1;
+	return Result;
+}
+
+float4 VertexFactoryGetVertexColor(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return 1;
+}
+
+/** Converts from vertex factory specific input to a FMaterialVertexParameters, which is used by vertex shader material inputs. */
+FMaterialVertexParameters GetMaterialVertexParameters( FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 WorldPosition, float3x3 TangentBasis )
+{
+	FMaterialVertexParameters Result;
+	Result.WorldPosition = WorldPosition - PreViewTranslation.xyz;
+	Result.WorldNormal = TangentBasis[2];
+	Result.VertexColor = VertexFactoryGetVertexColor(Input, Intermediates);
+	return Result;
+}
+
+float2 GetLightMapCoordinate(FVertexFactoryInterpolants Interpolants)
+{
+#if NEEDS_LIGHTMAP_COORDINATE
+	return Interpolants.LightMapCoordinate.xy;
+#else	//#if NEEDS_LIGHTMAP_COORDINATE
+	return Interpolants.HeightWeightMapTexCoord.xy;
+#endif	//#if NEEDS_LIGHTMAP_COORDINATE
+}
+
+#if NEEDS_SHADOWMAP_COORDINATE && NEEDS_LIGHTMAP_COORDINATE
+float2 GetShadowMapCoordinate(FVertexFactoryInterpolants Interpolants)
+{
+//	return Interpolants.LightMapCoordinate.xy * ShadowmapCoordinateScaleBias.xy + ShadowmapCoordinateScaleBias.zw;
+	return Interpolants.LightMapCoordinate.xy;
+}
+#endif
+
+#if NEEDS_VERTEX_LIGHTMAP
+void VertexFactoryGetVertexLightMap(FVertexFactoryInput Input,out float4 LightMapA,out float4 LightMapB)
+{
+	LightMapA = 1;
+	LightMapB = 1;
+}
+#elif NEEDS_SIMPLE_VERTEX_LIGHTMAP
+void VertexFactoryGetSimpleVertexLightMap(FVertexFactoryInput Input,out float4 LightMapA)
+{
+	LightMapA = 1;
+}
+#endif
+
+/** derive basis vectors */
+float3x3 CalcTangentBasis(FVertexFactoryIntermediates Intermediates)
+{
+	float3	LocalTangentX = float3(-Intermediates.Normal.z,0,Intermediates.Normal.x),
+			LocalTangentY = float3(0,Intermediates.Normal.z,-Intermediates.Normal.y);
+	LocalTangentX = normalize(LocalTangentX);
+	LocalTangentY = normalize(LocalTangentY);
+	return float3x3(LocalTangentX,LocalTangentY,Intermediates.Normal);
+}
+
+
+FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
+{
+	FVertexFactoryIntermediates Intermediates;
+
+	const float2 VertexOffsets[6] = {	float2(0,0),
+									float2(1,1),
+									float2(1,0),
+									float2(0,0),
+									float2(0,1),
+									float2(1,1) };
+
+	float2 InputPosition;
+
+	// Quad index
+	float QuadIndex = Input.VertexIndex.x;
+
+	// Divide by SectionSizeQuads to get y.
+	InputPosition.y = floor((QuadIndex + 0.5) * SectionSizeQuadsLayerUVPan.y);	// 0.5 is to solve rounding errors causing incorrect quad calculations
+	// Find the remainder for x.
+	InputPosition.x = QuadIndex - InputPosition.y * SectionSizeQuadsLayerUVPan.x;
+	// Offset by Quad vertex offset (0-5).
+	InputPosition += VertexOffsets[Input.VertexIndex.y];
+
+	float2 InputPositionLODAdjusted = InputPosition.xy * LodValues.y;
+	float4 SampleCoords = float4(InputPositionLODAdjusted * HeightmapUVScaleBias.xy + HeightmapUVScaleBias.zw + 0.5*HeightmapUVScaleBias.xy, 0, LodValues.x);
+	float4 SampleValue = tex2Dlod( HeightmapTexture, SampleCoords );
+	float Height = ((SampleValue.r * 255.0 * 256.0 + SampleValue.g * 255.0) - 32768.0) * TERRAIN_ZSCALE;
+	float2 Normal = float2(SampleValue.b, SampleValue.a);
+
+	// calculate amount of morphing based on LOD.
+	float LodDistance = length(LodDistancesValues.xy - InputPositionLODAdjusted);
+	//float MorphAlpha = LodDistance >= LodDistancesValues.w ? 1.0 : 0.0;
+	float MorphAlpha = clamp( (LodDistance - LodDistancesValues.z) / (LodDistancesValues.w - LodDistancesValues.z), 0.0, 1.0 );
+
+	float2 NextLODCoordsInt = floor( InputPositionLODAdjusted * LodValues.z + float2(0.5,0.5) );
+	float2 InputPositionNextLOD = NextLODCoordsInt * LodValues.w;
+
+	SampleCoords = float4(InputPositionNextLOD * HeightmapUVScaleBias.xy + HeightmapUVScaleBias.zw + 0.5*HeightmapUVScaleBias.xy, 0, LodValues.x+1);
+	SampleValue = tex2Dlod( HeightmapTexture, SampleCoords );
+	float HeightNextLOD = ((SampleValue.r * 255.0 * 256.0 + SampleValue.g * 255.0) - 32768.0) * TERRAIN_ZSCALE;
+	float2 NormalNextLOD = float2(SampleValue.b, SampleValue.a);
+
+	Intermediates.LocalPosition = lerp( float3(InputPositionLODAdjusted, Height), float3(InputPositionNextLOD, HeightNextLOD), MorphAlpha );
+	float2 InterpNormal = lerp( Normal, NormalNextLOD, MorphAlpha ) * float2(2.0,2.0) - float2(1.0,1.0);
+	Intermediates.Normal = float3( InterpNormal, sqrt(1.0-dot(InterpNormal,InterpNormal)) );
+	
+	return Intermediates;
+}
+
+float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	ISOLATE
+	{
+		return MulMatrix(LocalToWorld,float4(Intermediates.LocalPosition,1));
+	}
+}
+
+FVertexFactoryInterpolants VertexFactoryGetInterpolants(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	FVertexFactoryInterpolants Interpolants;
+
+	float3	LocalTangentX = float3(-Intermediates.Normal.z,0,Intermediates.Normal.x),
+			LocalTangentY = float3(0,Intermediates.Normal.z,-Intermediates.Normal.y);
+	LocalTangentX = normalize(LocalTangentX);
+	LocalTangentY = normalize(LocalTangentY);
+
+	Interpolants.LayerTexCoord		= float3(Intermediates.LocalPosition.xy + SectionSizeQuadsLayerUVPan.zw,0);
+	Interpolants.HeightWeightMapTexCoord.xy	= Intermediates.LocalPosition.xy * HeightmapUVScaleBias.xy + HeightmapUVScaleBias.zw + 0.5*HeightmapUVScaleBias.xy;
+	Interpolants.HeightWeightMapTexCoord.zw	= Intermediates.LocalPosition.xy * WeightmapUVScaleBias.xy + WeightmapUVScaleBias.zw;
+#if NEEDS_LIGHTMAP_COORDINATE
+	Interpolants.LightMapCoordinate	= Intermediates.LocalPosition.xy;
+#endif // NEEDS_LIGHTMAP_COORDINATE
+
+#if WORLD_COORDS
+	float3x3 LocalToTangent = float3x3(LocalTangentX,LocalTangentY,Intermediates.Normal);
+	float3x3 TangentToLocal = transpose(LocalToTangent);
+
+	// Calculate the transform from tangent to world space
+	#if PS3
+		float3x3 TangentToWorld = mul(transpose((float3x3)LocalToWorld), TangentToLocal); 
+	#else
+		float3x3 TangentToWorld = mul((float3x3)LocalToWorld, TangentToLocal); 
+	#endif
+
+	Interpolants.TangentToWorld0 = TangentToWorld[0];
+	Interpolants.TangentToWorld2 = float4(TangentToWorld[2], sign(determinant(LocalToTangent)));
+
+	Interpolants.TangentToWorld0 = PackColor3( Interpolants.TangentToWorld0 );
+	Interpolants.TangentToWorld2 = PackColor4( Interpolants.TangentToWorld2 );
+#endif
+
+	return Interpolants;
+}
+
+half3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return MulMatrix( LocalToWorld, half4(Intermediates.Normal, 0) );
+}
+
+float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return MulMatrix(PreviousLocalToWorld,float4(Intermediates.LocalPosition,1));
+}
+
+/**
+* Get the 3x3 tangent basis vectors for this vertex factory
+*
+* @param Input - vertex input stream structure
+* @return 3x3 matrix
+*/
+float3x3 VertexFactoryGetTangentBasis( FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates )
+{
+	float3x3 Result = CalcTangentBasis(Intermediates);
+
+#if DECAL_FACTORY
+	Result = ProjectDecalTangents(Result[2]);
+#endif
+
+	return Result;
+}
+
+/**
+* Transform a vector from world space to tangent space
+*
+* @param Input - vertex input stream structure
+* @param TangentBasis - 3x3 matrix to transform to tangent space
+* @param WorldVector - vector in world space to transform 
+* @return vector in tangent space
+*/
+float3 VertexFactoryWorldToTangentSpace( FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3x3 TangentBasis, float3 WorldVector )
+{
+	// we use a straight mul here because we are generating the matrix, so we don't worry about column major vs row major (which is what MulMatrix manages per-platform)
+	//WorldVector.x *= InvMaxTesselationLevel_ZScale.z;
+	//WorldVector.y *= InvMaxTesselationLevel_ZScale.w;
+	return mul(TangentBasis,MulMatrix(float4(WorldVector,0),LocalToWorld).xyz);
+}

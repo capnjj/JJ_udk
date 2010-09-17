@@ -1,0 +1,19 @@
+Log: Log file open, 09/16/10 09:46:18
+Init: WinSock: version 1.1 (2.2), MaxSocks=32767, MaxUdp=65467
+Init: Version: 7026
+Init: Epic Internal: 0
+Init: Compiled (32-bit): Aug  3 2010 15:17:11
+Init: Changelist: 597149
+Init: Command line: -firstinstall -LanguageForCooking=INT -DEFENGINEINI=..\..\UDKGame\Config\DefaultEngine.ini
+Init: Base directory: G:\UDK\UDK-2010-08\Binaries\Win32\
+DevConfig: GConfig::LoadFile associated file:  ..\..\UDKGame\Config\UDKCompat.ini
+[0000.12] Init: Computer: MITHRANDIR
+[0000.12] Init: User: Michael
+[0000.12] Init: CPU Page size=4096, Processors=2
+[0000.12] Init: High frequency timer resolution =25.000000 MHz
+[0000.12] Init: Memory total: Physical=4.0GB Pagefile=8.0GB Virtual=4.0GB
+[0000.12] Log: STEAMWORKS initialized 0
+[0000.16] Init: WinSock: I am Mithrandir (10.0.0.1:0)
+[0000.16] Init: Presizing for 0 objects not considered by GC, pre-allocating 0 bytes.
+[0000.16] Init: Object subsystem initialized
+[0000.16] Log: Last hardware survey: Ver=-1, Date=0. Uploading again.

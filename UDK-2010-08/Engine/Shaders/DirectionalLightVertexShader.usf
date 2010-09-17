@@ -1,0 +1,66 @@
+/*=============================================================================
+	DirectionalLightVertexShader.hlsl: Directional light vertex shader.
+	Copyright 1998-2010 Epic Games, Inc. All Rights Reserved.
+=============================================================================*/
+
+#define NEEDS_LIGHTMAP_COORDINATE STATICLIGHTING_TEXTUREMASK
+
+#if ENABLE_DISTANCE_SHADOW_FADING
+	// World position is needed when fading based on distance between dynamic and precomputed shadows
+	#undef WORLD_POS
+	#define WORLD_POS 1
+#endif
+
+#include "Common.usf"
+#include "Material.usf"
+#include "VertexFactory.usf"
+
+float3 LightDirection;
+
+void Main(
+	FVertexFactoryInput Input,
+#if STATICLIGHTING_VERTEXMASK
+	float LightMask : BLENDWEIGHT0,
+#endif
+	out FVertexFactoryInterpolants OutFactoryInterpolants,
+	out float3 OutTangentLightVector : TEXCOORD4,
+	out float4 OutWorldLightVector : TEXCOORD5,
+	out float4 OutCameraVectorOrVertexColor : TEXCOORD6,
+	out float4 OutPixelPosition : TEXCOORD7,
+	out float4 OutPosition : POSITION
+	)
+{
+	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+	float4 WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates);
+	float3x3 TangentBasis = VertexFactoryGetTangentBasis(Input, VFIntermediates);
+
+	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentBasis);
+	// Isolate instructions used for world position offset on xbox 360, 
+	// As these cause the optimizer to generate different position calculating instructions in each pass, resulting in self-z-fighting.
+	// This is only necessary for shaders used in passes that have depth testing enabled.
+	ISOLATE
+	{
+		WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
+	}
+
+	OutPosition = MulMatrix(ViewProjectionMatrix,WorldPosition);
+	OutFactoryInterpolants = VertexFactoryGetInterpolants(Input, VFIntermediates);
+#if WORLD_POS
+	OutPixelPosition = WorldPosition;
+#else
+	OutPixelPosition = OutPosition;
+#endif
+
+	OutCameraVectorOrVertexColor = 1;
+#if PER_PIXEL_CAMERA_VECTOR
+	OutCameraVectorOrVertexColor = VertexFactoryGetVertexColor( Input, VFIntermediates );
+#else
+	OutCameraVectorOrVertexColor.xyz = VertexFactoryWorldToTangentSpace(Input,VFIntermediates,TangentBasis,CameraPosition.xyz - WorldPosition.xyz * CameraPosition.w);
+#endif
+
+	OutTangentLightVector = VertexFactoryWorldToTangentSpace(Input,VFIntermediates,TangentBasis,LightDirection);
+	OutWorldLightVector = 0;
+#if STATICLIGHTING_VERTEXMASK
+	OutWorldLightVector.w = LightMask;
+#endif
+}

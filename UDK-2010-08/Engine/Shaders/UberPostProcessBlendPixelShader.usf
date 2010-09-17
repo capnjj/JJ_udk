@@ -1,0 +1,299 @@
+/*=============================================================================
+	UberPostProcessBlendPixelShader.usf: Pixel shader for blending multiple post processing results with the scene color.
+	Copyright 1998-2010 Epic Games, Inc. All Rights Reserved.
+=============================================================================*/
+
+#include "PostProcessCommon.usf"
+#include "DepthOfFieldCommon.usf"
+
+sampler2D BlurredImage;
+float4 BloomTintAndScreenBlendThreshold;
+
+sampler2D BlurredImageSeperateBloom;
+
+#if USE_DOF_BLUR_BUFFER
+sampler2D DoFBlurBuffer;
+#endif
+
+#if USE_TONEMAP_AND_COLORGRADING
+	#if XBOX
+		sampler3D ColorGradingLUT;
+	#else // XBOX
+		sampler2D ColorGradingLUT;
+	#endif // XBOX
+#endif // USE_TONEMAP_AND_COLORGRADING
+
+
+
+#include "MotionBlurCommon.usf"
+
+
+#if USE_TONEMAP_AND_COLORGRADING
+//  @param InLDRColor in gamma space, has to be in 0..1 range
+half3 ColorLookupTable(half3 InLDRColor)
+{
+#if XBOX
+	half3 ret = tex3D(ColorGradingLUT, InLDRColor * 15.0f / 16.0f + 0.5f / 16.0f);
+#else // XBOX
+	// requires a volume texture 16x16x16 unwrapped in a 2d texture 256x16
+	// can be optimized by using a volume texture
+	float2 Offset = float2(0.5f / 256.0f, 0.5f / 16.0f);
+	float Scale = 15.0f / 16.0f; 
+
+	// Also consider blur value in the blur buffer written by translucency
+	float IntB = floor(InLDRColor.b * 14.9999f) / 16.0f;
+	float FracB = (InLDRColor.b - IntB) * 16.0f;
+
+	float U = IntB + InLDRColor.r * Scale / 16.0f;
+	float V = InLDRColor.g * Scale;
+
+	half3 RG0 = tex2D(ColorGradingLUT, Offset + float2(U             , V)).rgb;
+	half3 RG1 = tex2D(ColorGradingLUT, Offset + float2(U + 1.0f / 16.0f, V)).rgb;
+
+	half3 ret = lerp(RG0, RG1, FracB);
+
+#if SM4_PROFILE
+	ret.rgb = ret.bgr; 
+#endif
+
+#endif // XBOX
+
+	return ret;
+}
+#endif // USE_TONEMAP_AND_COLORGRADING
+
+
+sampler2D	LowResSceneBufferPoint;
+
+/**
+* Returns scene color in rgb, depth in a, point filtered
+*/
+float4 CalcSceneColorAndDepthHalfResPoint( float2 HalfResUV )
+{
+	float4 FocusedSceneColorAndDepth = tex2D(LowResSceneBufferPoint, HalfResUV);
+
+	// bring from texture usable range to worldspace range
+	FocusedSceneColorAndDepth.a = DecompressDeviceZFromHalfResTextureChannel(FocusedSceneColorAndDepth.a);
+
+	return FocusedSceneColorAndDepth;
+}
+
+
+/*=============================================================================
+ * Pixel Shader
+ *============================================================================*/
+
+void Main(
+	in float4 ScreenPosition : TEXCOORD0,
+	in float4 FilterBufferUV : TEXCOORD1,
+	out float4 OutColor : COLOR0
+	)
+{
+	// full resolution 
+	float2 FullResUV = FilterBufferUV.xy;
+	// 1:1 with rendertarget
+	float2 HalfResUV = FilterBufferUV.zw;
+	// quarter resolution
+	float2 QuarterResUV = ScreenPosition.zw;
+
+	half4 SceneColorAndDepth = CalcSceneColorAndDepth(FullResUV);
+
+#if REFERENCE_DOF
+	// reference DOF (no motionblur, very inefficient but simple and best quality bokeh, not for production use, good to verify approximations and the possible look)
+	half3 DOFResult;
+	{
+		// Radius can be tweaked to get bigger bokeh (slower) 1->3x3, 2-> 5x5, 3->7x7, 4->9x9
+		const int PixelRadius = 2;
+		// slight offset to avoid too regular disk shape
+		const half2 PixelOffset = float2(0.25f, 0.25f); 
+		// bias value tweaked to align with offset
+		const half Bias = 0.37f;
+
+		half CenterCircleRadius = saturate(CalcUnfocusedPercent(SceneColorAndDepth.a)) * (PixelRadius + 1 - Bias * 2) + Bias;
+
+		float4 Accum = float4(0,0,0,0.00001f);
+		LOOP for(int y = -PixelRadius; y <= PixelRadius; ++y)
+		{
+			for(int x = -PixelRadius; x <= PixelRadius; ++x)
+			{
+				const float2 PixelRel = float2(x,y) + PixelOffset; 
+
+				half4 LocalSceneColorAndDepth = CalcSceneColorAndDepth(FullResUV + MinMaxBlurClamp.zw * float2(x, y));
+
+				half CircleRadius = saturate(CalcUnfocusedPercent(LocalSceneColorAndDepth.a)) * (PixelRadius + 1 - Bias * 2) + Bias;
+
+				// to avoid leaking into a sharper center pixel from behind (more correct but often not visible)/
+				// commented that as often it looks better without
+//				if(CenterCircleRadius < CircleRadius && LocalSceneColorAndDepth.a > SceneColorAndDepth.a)
+//				{
+//					CircleRadius = CenterCircleRadius;
+//				}
+
+				// soft comparison -> AA bokeh shape
+				float LocalWeight = saturate( - (length(PixelRel) - CircleRadius));
+
+				// bigger bokeh shapes become more transparent
+				LocalWeight /= CircleRadius*CircleRadius;
+
+				Accum += float4(LocalSceneColorAndDepth.rgb,1) * LocalWeight;
+			}
+		}
+		// normalize
+		DOFResult = Accum.rgb / Accum.w;
+	}
+#else
+	{
+		half4 HalfResMotionBlurDOF = tex2D(LowResSceneBuffer, HalfResUV);
+		// combine with MotionBlur and DepthOfField
+		SceneColorAndDepth.rgb = HalfResMotionBlurDOF.rgb + SceneColorAndDepth.rgb * HalfResMotionBlurDOF.a;
+	}
+
+	half3 DOFResult = SceneColorAndDepth.rgb;
+
+#endif
+
+	// Bloom
+
+	half3 BloomContribution = MAX_SCENE_COLOR * tex2D(BlurredImageSeperateBloom,QuarterResUV).rgb * BloomTintAndScreenBlendThreshold.rgb;
+
+	half Luminance = dot(DOFResult.rgb, half3(.3f, .59f, .11f));
+	// Use an exponential function that converges on 0 slowly
+	// This minimizes the halo creates by the screen blend when the source image is a bright gradient
+	half BloomScreenBlendFactor = saturate(BloomTintAndScreenBlendThreshold.a * exp2(-3 * Luminance));
+	// Use a screen blend to apply bloom to scene color, which prevents already bright areas from washing out
+	BloomContribution *= BloomScreenBlendFactor;
+	DOFResult += BloomContribution;
+
+
+	// Material effect
+
+#if USE_TONEMAP_AND_COLORGRADING
+	// tonemapper with color grading, deactiavtes the soft clamp - active when a texture is specified in the active PostProcessVolume
+	half3 LinearColor = DOFResult;
+
+	// simple but effective tonemapper (includes gamma correction), outputs in 0..1 range (for that we use abs() and saturate())
+	half3 GammaColor = saturate(LinearColor / abs(LinearColor + 0.187f) * 1.035f);
+
+	// color grading based on 3D color LUT, also do linear to gamma conversion
+	// line can be commented out to see it without color grading 
+	// also includes ColorCorrection() (SceneShadows, MidTones, Highlights, Desaturation)
+	GammaColor = ColorLookupTable(GammaColor);
+
+	// D3D10 does some magic with gamma, without it it would appear to bright
+#if SM4_PROFILE
+	// max() clamp to get nice behavior for negative colors (see level sm2test)
+	GammaColor = UnClampedPow(max(SmallPowConst, GammaColor), 2.2f * GammaInverse);
+#endif
+
+	OutColor = RETURN_COLOR( float4(GammaColor, 0.f) );
+#else
+	half3 LinearColor = ColorCorrection(DOFResult);
+
+	OutColor = RETURN_COLOR( float4(pow(saturate(LinearColor), GammaInverse), 0.f) );
+#endif
+}
+
+
+
+
+// half resolution, runs before final uber postprocess pass
+// RGB color to add to FullResScene (MotionBlur, DOF, Bloom), A=0..1 weight of the FullResScene
+void UberHalfResMain(
+	in float4 ScreenPosition : TEXCOORD0,
+	in float4 FilterBufferUV : TEXCOORD1,
+	out float4 OutColor : COLOR0
+	)
+{
+	// full resolution 
+	float2 FullResUV = FilterBufferUV.xy;
+	// 1:1 with rendertarget
+	float2 HalfResUV = FilterBufferUV.zw;
+	// quarter resolution
+	float2 QuarterResUV = ScreenPosition.zw;
+
+	half4 FocusedSceneColorAndDepth = CalcSceneColorAndDepthHalfResPoint(HalfResUV);
+
+	// 0..1, 0=take no FullResScene, 1=take 100% FullResScene
+	half FullResWeight = 1;
+
+    // DOF and bloom effect
+
+	//focused scene color in rgb, depth in a
+	half  FocusedWeight = saturate(1 - CalcUnfocusedPercent(FocusedSceneColorAndDepth.a));
+
+#if USE_DOF_BLUR_BUFFER
+	// Also consider blur value in the blur buffer written by translucency
+	FocusedWeight = max(FocusedWeight, tex2D(DoFBlurBuffer, FullResUV).r);
+#endif
+
+	half3 UnfocusedSceneColor;
+	
+#if USE_DOF_HIGHQUALITY
+	{
+		// Radius can be tweaked to get bigger bokeh (slower) 1->3x3, 2-> 5x5, 3->7x7, 4->9x9
+		const int PixelRadius = 1;
+
+		float4 SceneColorAndDepth = FocusedSceneColorAndDepth;
+
+		half CenterCircleRadius = saturate(CalcUnfocusedPercent(SceneColorAndDepth.a)) * (PixelRadius + 1);
+
+		float4 Accum = float4(0,0,0,0.00001f);
+		//FLATTEN 
+		for(int y = -PixelRadius; y <= PixelRadius; ++y)
+		{
+			//FLATTEN 
+			for(int x = -PixelRadius; x <= PixelRadius; ++x)
+			{
+				const float2 PixelRel = float2(x,y); 
+
+				half4 LocalSceneColorAndDepth = CalcSceneColorAndDepthHalfResPoint(HalfResUV + 2 * MinMaxBlurClamp.zw * float2(x, y));
+
+				// + small bias to avoid dark line where x == y == 0
+				half CircleRadius = saturate(CalcUnfocusedPercent(LocalSceneColorAndDepth.a)) * (PixelRadius + 1) + 0.01f;
+
+				// soft comparison -> AA bokeh shape
+				float LocalWeight = saturate(CircleRadius - length(PixelRel));
+
+				// bigger bokeh shapes become more transparent
+				LocalWeight /= CircleRadius*CircleRadius;
+
+				Accum += float4(LocalSceneColorAndDepth.rgb,1) * LocalWeight;
+			}
+		}
+		// normalize
+		UnfocusedSceneColor = Accum.rgb / Accum.w;
+
+		// tweaked to fade in full resolution pixels where needed
+		FocusedWeight = saturate(FocusedWeight*(2*PixelRadius + 0.5f) - 2*PixelRadius);
+	}
+
+#else // USE_DOF_HIGHQUALITY
+	{
+		//UnfocusedSceneColor in .rgb, UnfocusedWeight in .a
+		//Scale color back up as it was compressed to the [0-1] range to fit in the fixed point filter buffer
+		half4 UnfocusedSceneColorAndWeight = MAX_SCENE_COLOR * tex2D(BlurredImage, QuarterResUV.xy);
+
+		// the following two lines fix dark borders with strong DOF radius
+		half WeightSum = FocusedWeight + UnfocusedSceneColorAndWeight.a;
+		UnfocusedSceneColor = (FocusedSceneColorAndDepth.rgb * FocusedWeight + UnfocusedSceneColorAndWeight.rgb) / WeightSum;
+	}
+#endif // USE_DOF_HIGHQUALITY
+
+	FullResWeight *= FocusedWeight;
+
+#if MOTION_BLUR
+	// MotionWeight 0..1, 0=no motion
+	half3 MotionBlurColor;
+	half MotionWeight = MotionBlur(FocusedSceneColorAndDepth.rgb, float4(ScreenPosition.xy, HalfResUV), MotionBlurColor);
+
+	// strong DOF overrules the motionblur
+	MotionWeight *= FullResWeight;
+
+	UnfocusedSceneColor = lerp(UnfocusedSceneColor, MotionBlurColor, MotionWeight);
+	FullResWeight *= 1.0f - MotionWeight;
+#endif
+
+	UnfocusedSceneColor *= 1.0f - FullResWeight;
+
+	OutColor = float4(UnfocusedSceneColor, FullResWeight);
+}

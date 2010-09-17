@@ -1,0 +1,8 @@
+/*=============================================================================
+	MotionBlurPixelShader.usf: Blurs based on velocity vector.
+	Copyright 1998-2010 Epic Games, Inc. All Rights Reserved.
+=============================================================================*/
+
+#include "Common.usf"
+#include "MotionBlurCommon.usf"
+
